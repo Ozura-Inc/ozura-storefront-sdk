@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.3.4";
+export const SDK_VERSION = "0.3.5";
 
 /**
  * Default Ozura storefront API base. Currently points at the development
@@ -478,6 +478,7 @@ export class OzuraStorefront {
    * but NOT for embedding in a third-party iframe.
    */
   async createCart(input: CreateCartInput): Promise<CreateCartResult> {
+    this.refusePublicFlavor("createCart", "mint cart links");
     if (!input.items?.length) {
       throw new Error("createCart: items array is required");
     }
@@ -506,6 +507,7 @@ export class OzuraStorefront {
    * a boundary record from the previous batch.
    */
   async listOrders(input: ListOrdersInput = {}): Promise<ListOrdersResult> {
+    this.refusePublicFlavor("listOrders", "read orders");
     const params = new URLSearchParams();
     if (input.since) params.set("since", input.since);
     if (input.status) params.set("status", input.status);
@@ -536,6 +538,7 @@ export class OzuraStorefront {
    * transactionId doesn't belong to your merchant.
    */
   async verifyOrder(transactionId: string): Promise<Order> {
+    this.refusePublicFlavor("verifyOrder", "verify orders");
     if (!transactionId) {
       throw new Error("verifyOrder: transactionId is required");
     }
@@ -547,6 +550,23 @@ export class OzuraStorefront {
   }
 
   // ─── private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Pre-flight guard for methods that public-flavor (`oz_sfp_…`) keys
+   * can't authorize. Throws locally with a sharper message than the
+   * server's 403 — saves a network round-trip and gives agents a clear
+   * pointer at the key-flavor table when they pick the wrong key.
+   * Server still enforces; this is the friendly first line.
+   */
+  private refusePublicFlavor(method: string, action: string): void {
+    if (this._keyFlavor === "public") {
+      throw new Error(
+        `OzuraStorefront.${method}: cannot ${action} with a public-flavor key (oz_sfp_…). ` +
+          `Public keys are catalog-read-only — use a server-flavor key (oz_sf_…) for this. ` +
+          `See https://github.com/Ozura-Inc/ozura-storefront-sdk/blob/main/AGENTS.md#key-flavors`,
+      );
+    }
+  }
 
   private async request<T>(
     method: "GET" | "POST",
