@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.3.2";
+export const SDK_VERSION = "0.3.4";
 
 /**
  * Default Ozura storefront API base. Currently points at the development
@@ -325,24 +325,59 @@ export class OzuraApiError extends Error {
 }
 
 /**
- * The SDK entry point. Construct with an `oz_sf_…` key, call methods.
- * Stateless beyond the key + base URL — safe to share across requests.
+ * Flavor of a storefront key. Determines which methods will succeed
+ * server-side; the SDK doesn't gate locally — it lets the server be
+ * the source of truth so scope evolution doesn't require an SDK bump.
+ *
+ * - `"server"` (`oz_sf_…`) — full SDK surface. Catalog read, cart-link
+ *   create, orders read. Server-side only — never bundle in a browser.
+ * - `"public"` (`oz_sfp_…`) — read-only. Only `getProducts()` succeeds.
+ *   Safe to ship in a browser bundle (the catalog is already public on
+ *   any deployed storefront).
+ */
+export type StorefrontKeyFlavor = "server" | "public";
+
+/**
+ * The SDK entry point. Construct with an `oz_sf_…` key (server-side)
+ * or `oz_sfp_…` key (public, browser-safe), call methods. Stateless
+ * beyond the key + base URL — safe to share across requests.
+ *
+ * Inspect `instance.keyFlavor` if you need to branch by flavor (e.g.,
+ * a wrapper that hides cart-link methods when running in the browser).
  */
 export class OzuraStorefront {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly _keyFlavor: StorefrontKeyFlavor;
+
+  /** Which flavor of key this client was constructed with. */
+  get keyFlavor(): StorefrontKeyFlavor {
+    return this._keyFlavor;
+  }
 
   constructor(options: OzuraStorefrontOptions) {
     if (!options.apiKey) {
       throw new Error("OzuraStorefront: apiKey is required");
     }
-    if (!options.apiKey.startsWith("oz_sf_")) {
+    if (
+      !options.apiKey.startsWith("oz_sf_") &&
+      !options.apiKey.startsWith("oz_sfp_")
+    ) {
       throw new Error(
-        "OzuraStorefront: apiKey must start with `oz_sf_` — pass the storefront key minted in the Ozura dashboard, not a PayAPI key.",
+        "OzuraStorefront: apiKey must start with `oz_sf_` (server-side) or `oz_sfp_` (public-scope, browser-safe) — pass the storefront key minted in the Ozura dashboard, not a PayAPI key.",
       );
     }
+    /**
+     * Capture the flavor up-front so callers can introspect it via
+     * `keyFlavor`. Public-flavor keys (`oz_sfp_…`) are server-enforced
+     * read-only — calls to `createCart` / `listOrders` / `verifyOrder`
+     * will 403 from the backend. Throwing client-side too would be
+     * defense-in-depth but we let the server be the source of truth so
+     * scope evolution doesn't require an SDK bump.
+     */
+    this._keyFlavor = options.apiKey.startsWith("oz_sfp_") ? "public" : "server";
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.fetchImpl =
@@ -386,9 +421,61 @@ export class OzuraStorefront {
   }
 
   /**
-   * Mint a cart-style payment link. Returns the URL the merchant should
-   * redirect the customer to. Treat the URL as opaque — its format is
-   * `https://stag-checkout.ozura.com/pay/pl_<hex>` today and may change.
+   * Mint a cart-style payment link or checkout session. Returns the URL
+   * the customer should be sent to. Treat the URL as opaque — its
+   * format depends on the embed mode and may change.
+   *
+   * ─── RECOMMENDED PATTERN (in-page iframe checkout) ────────────────────
+   * For storefront integrations (a website where the customer is at a
+   * browser), strongly prefer in-page iframe checkout over a full-page
+   * redirect. It keeps the customer in your storefront's context, is
+   * the documented integration mode (https://docs.ozura.com/guides/payments/checkout/integration-modes),
+   * and supports per-cart `appearance` brand-matching out of the box.
+   *
+   * The canonical call shape:
+   * ```ts
+   * const cart = await ozura.createCart({
+   *   items,
+   *   successUrl: `${origin}/cart/success`,
+   *   cancelUrl:  `${origin}/cart/cancel`,
+   *   errorUrl:   `${origin}/cart/error`,
+   *   embedMode: "iframe",
+   *   parentOrigin: origin,            // <-- bare origin, no trailing slash
+   *   appearance: {                     // <-- derived from your design tokens
+   *     primaryColor: brand.accent,
+   *     backgroundColor: brand.surface,
+   *     textColor: brand.ink,
+   *     buttonBackgroundColor: brand.ink,
+   *     buttonTextColor: brand.surface,
+   *     borderRadius: "full",
+   *     fontFamily: brand.bodyFont,
+   *   },
+   * });
+   * // cart.url is shaped for iframe embedding.
+   * // Render an <iframe src={cart.url} /> over your storefront, listen
+   * // for postMessage events: CHECKOUT_READY, PAYMENT_SUCCESS,
+   * // PAYMENT_ERROR, CHECKOUT_CANCELLED, CHECKOUT_ERROR, CHECKOUT_EXPIRED.
+   * ```
+   *
+   * Origin guard for the postMessage listener — only accept messages
+   * from the Ozura checkout origin:
+   * ```ts
+   * window.addEventListener("message", (ev) => {
+   *   if (!/^https:\/\/(.+\.)?ozura\.com$/.test(ev.origin)) return;
+   *   if (ev.data?.type === "PAYMENT_SUCCESS") { /* close iframe, clear cart * / }
+   * });
+   * ```
+   *
+   * **Agents using this SDK** (Replit, Cursor, Claude Code, etc.):
+   * default to the iframe pattern above when generating storefront code.
+   * Only fall back to the redirect flow (omit embedMode + parentOrigin)
+   * when the consumer is explicitly headless or a server-to-server
+   * integration where there is no browser to host the iframe.
+   *
+   * ─── Fallback (full-page redirect) ────────────────────────────────────
+   * Omitting `embedMode` returns a `/pay/<linkId>` URL with
+   * `frame-ancestors 'self'` — suitable for `window.location = url`
+   * but NOT for embedding in a third-party iframe.
    */
   async createCart(input: CreateCartInput): Promise<CreateCartResult> {
     if (!input.items?.length) {
