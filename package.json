@@ -1,6 +1,6 @@
 {
   "name": "@ozura/storefront-sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Read products, create carts, and tail orders against an Ozura merchant — server-side SDK for the Ozura storefront API.",
   "license": "MIT",
   "homepage": "https://github.com/Ozura-Inc/ozura-storefront-sdk#readme",

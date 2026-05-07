@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.3.0";
 
 /**
  * Default Ozura storefront API base. Currently points at the development
@@ -52,6 +52,15 @@ export interface CartItemInput {
   qty: number;
   unitPrice: number;
   imageUrl?: string;
+  /**
+   * When set, the cart-link is minted as a recurring-checkout session
+   * instead of a one-shot cart. Pass through the {@link
+   * StorefrontProductRecurring} sub-doc you got from `getProducts()` to
+   * keep the cycle config intact. Mixing recurring and one-off items in
+   * a single cart is not supported in v1 — split into separate
+   * `createCart()` calls.
+   */
+  recurring?: StorefrontProductRecurring;
 }
 
 export interface CreateCartInput {
@@ -89,10 +98,42 @@ export interface CreateCartResult {
   amount: number;
 }
 
+/**
+ * Optional subscription / recurring-billing config on a product. When
+ * present the parent product's `price` is the **per-cycle amount** (not
+ * a one-time charge); customers are enrolled into a recurring schedule
+ * at checkout. SDK consumers (Conjure, Replit integrations, custom
+ * Node services) should render a "$29.99 / mo" pill instead of a plain
+ * price when this is set.
+ */
+export interface StorefrontProductRecurring {
+  interval: "daily" | "weekly" | "monthly" | "yearly";
+  intervalCount?: number;
+  /** YYYY-MM-DD; absent means "starts at checkout time". */
+  startDate?: string;
+  /** YYYY-MM-DD; absent means open-ended. */
+  endDate?: string;
+  /** Total billing cycles cap; absent means open-ended. */
+  maxCycles?: number;
+  /** One-time charge added at enrollment (e.g. activation fee). */
+  setupFee?: number;
+  /** Introductory pricing — `initialAmount` charged for the first
+   *  `initialCycles` cycles, then the regular `price` takes over. */
+  initialAmount?: number;
+  initialCycles?: number;
+  /** Florida-capped at 3.00. Optional surcharge % added each cycle. */
+  surchargePercent?: number;
+  /** Merchant-side external reference; surfaced on processor records. */
+  merchantRecurringReference?: string;
+}
+
 export interface StorefrontProduct {
   _id: string;
   name: string;
   description?: string;
+  /**
+   * Per-cycle amount when `recurring` is set; one-time charge otherwise.
+   */
   price: number;
   currency: string;
   imageUrl?: string;
@@ -108,6 +149,11 @@ export interface StorefrontProduct {
    *  size, material, country-of-origin, etc.). Capped server-side at
    *  50 entries with ≤200 char keys/values. */
   metadata?: Record<string, string>;
+  /**
+   * When present this product is a subscription. Absent = one-time
+   * charge. See {@link StorefrontProductRecurring}.
+   */
+  recurring?: StorefrontProductRecurring;
   inStock?: boolean;
   tracksInventory?: boolean;
   available?: number;
