@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.3.0";
+export const SDK_VERSION = "0.3.1";
 
 /**
  * Default Ozura storefront API base. Currently points at the development
@@ -87,6 +87,49 @@ export interface CreateCartInput {
    *  product-backed links when the underlying product has
    *  `requiresShipping: true`. */
   collectShippingAddress?: boolean;
+  /**
+   * Brand-match the hosted checkout to the storefront. SDK consumers
+   * (Conjure, Replit, custom Node) derive these tokens from the
+   * deployed site's design tokens (CSS custom props, theme schema, etc.)
+   * and forward them per cart-link mint — no CheckoutTheme pre-creation
+   * required. Server forwards verbatim to the upstream checkout
+   * service; unrecognized fields are ignored gracefully.
+   *
+   * Curated fields (colors, radius, fontFamily) are recognized;
+   * arbitrary additional keys flow through as `[key: string]: unknown`.
+   */
+  appearance?: CheckoutAppearance;
+}
+
+/**
+ * Shape of `CreateCartInput.appearance`. Curated subset of the
+ * dashboard's `CheckoutTheme.appearance` model — the AI builder /
+ * SDK consumer fills these from the site's design tokens.
+ */
+export interface CheckoutAppearance {
+  primaryColor?: string;
+  primaryHoverColor?: string;
+  backgroundColor?: string;
+  textColor?: string;
+  buttonBackgroundColor?: string;
+  buttonHoverColor?: string;
+  buttonTextColor?: string;
+  inputBackgroundColor?: string;
+  inputBorderColor?: string;
+  inputFocusBorderColor?: string;
+  borderRadius?: "none" | "sm" | "base" | "lg" | "xl" | "full";
+  fontFamily?: string;
+  fontSize?: "sm" | "base" | "lg" | "xl";
+  logoUrl?: string;
+  logoPosition?: "top" | "inline";
+  logoMaxHeight?: number;
+  showMerchantName?: boolean;
+  hideBranding?: boolean;
+  cancelButtonText?: string;
+  cancelButtonTextColor?: string;
+  cancelButtonBackgroundColor?: string;
+  /** Escape hatch for forward-compat fields. */
+  [key: string]: unknown;
 }
 
 export interface CreateCartResult {
