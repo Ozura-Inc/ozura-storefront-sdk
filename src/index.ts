@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.3.1";
+export const SDK_VERSION = "0.3.2";
 
 /**
  * Default Ozura storefront API base. Currently points at the development
@@ -99,6 +99,28 @@ export interface CreateCartInput {
    * arbitrary additional keys flow through as `[key: string]: unknown`.
    */
   appearance?: CheckoutAppearance;
+  /**
+   * Embed mode for the resulting checkout. When omitted (the default)
+   * `createCart` returns a full-page payment-link URL. When set to
+   * `"iframe"` or `"popup"` the backend mints a checkout *session*
+   * instead — the returned `url` is shaped for in-page embedding and
+   * the upstream emits standard postMessage events
+   * (CHECKOUT_READY, PAYMENT_SUCCESS, PAYMENT_ERROR, CHECKOUT_CANCELLED,
+   * CHECKOUT_ERROR, CHECKOUT_EXPIRED). See
+   * https://docs.ozura.com/guides/payments/checkout/integration-modes.
+   *
+   * Required: when set, also pass `parentOrigin`.
+   */
+  embedMode?: "iframe" | "popup";
+  /**
+   * Origin of the page that will host the iframe / open the popup —
+   * required when `embedMode` is set. Whitelists the parent origin in
+   * the upstream checkout's frame-ancestors policy.
+   *
+   * Pass the bare origin (scheme + host + port), e.g.
+   * `"https://shop.example.com"`. Trailing slashes are stripped server-side.
+   */
+  parentOrigin?: string;
 }
 
 /**
