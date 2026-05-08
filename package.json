@@ -1,6 +1,6 @@
 {
   "name": "@ozura/storefront-sdk",
-  "version": "0.2.0",
+  "version": "0.3.6",
   "description": "Read products, create carts, and tail orders against an Ozura merchant — server-side SDK for the Ozura storefront API.",
   "license": "MIT",
   "homepage": "https://github.com/Ozura-Inc/ozura-storefront-sdk#readme",
@@ -24,10 +24,12 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "AGENTS.md"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "sync:agents": "node scripts/sync-agent-guidance.mjs",
+    "build": "npm run sync:agents && tsup src/index.ts --format cjs,esm --dts --clean",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm run build"
   },

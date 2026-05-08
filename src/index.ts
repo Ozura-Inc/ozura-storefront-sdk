@@ -15,7 +15,14 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.2.0";
+export const SDK_VERSION = "0.3.6";
+
+/** Canonical SDK guidance for AI agents — generated from AGENTS.md.
+ *  Re-exported here so dashboard prompts and Conjure's codegen system
+ *  prompt can `import { AGENT_GUIDANCE_SDK } from "@ozura/storefront-sdk"`
+ *  instead of duplicating the rules. Update AGENTS.md and run
+ *  `npm run sync:agents` to regenerate. */
+export { AGENT_GUIDANCE_SDK } from "./agent-guidance.js";
 
 /**
  * Default Ozura storefront API base. Currently points at the development
@@ -52,6 +59,15 @@ export interface CartItemInput {
   qty: number;
   unitPrice: number;
   imageUrl?: string;
+  /**
+   * When set, the cart-link is minted as a recurring-checkout session
+   * instead of a one-shot cart. Pass through the {@link
+   * StorefrontProductRecurring} sub-doc you got from `getProducts()` to
+   * keep the cycle config intact. Mixing recurring and one-off items in
+   * a single cart is not supported in v1 — split into separate
+   * `createCart()` calls.
+   */
+  recurring?: StorefrontProductRecurring;
 }
 
 export interface CreateCartInput {
@@ -78,6 +94,71 @@ export interface CreateCartInput {
    *  product-backed links when the underlying product has
    *  `requiresShipping: true`. */
   collectShippingAddress?: boolean;
+  /**
+   * Brand-match the hosted checkout to the storefront. SDK consumers
+   * (Conjure, Replit, custom Node) derive these tokens from the
+   * deployed site's design tokens (CSS custom props, theme schema, etc.)
+   * and forward them per cart-link mint — no CheckoutTheme pre-creation
+   * required. Server forwards verbatim to the upstream checkout
+   * service; unrecognized fields are ignored gracefully.
+   *
+   * Curated fields (colors, radius, fontFamily) are recognized;
+   * arbitrary additional keys flow through as `[key: string]: unknown`.
+   */
+  appearance?: CheckoutAppearance;
+  /**
+   * Embed mode for the resulting checkout. When omitted (the default)
+   * `createCart` returns a full-page payment-link URL. When set to
+   * `"iframe"` or `"popup"` the backend mints a checkout *session*
+   * instead — the returned `url` is shaped for in-page embedding and
+   * the upstream emits standard postMessage events
+   * (CHECKOUT_READY, PAYMENT_SUCCESS, PAYMENT_ERROR, CHECKOUT_CANCELLED,
+   * CHECKOUT_ERROR, CHECKOUT_EXPIRED). See
+   * https://docs.ozura.com/guides/payments/checkout/integration-modes.
+   *
+   * Required: when set, also pass `parentOrigin`.
+   */
+  embedMode?: "iframe" | "popup";
+  /**
+   * Origin of the page that will host the iframe / open the popup —
+   * required when `embedMode` is set. Whitelists the parent origin in
+   * the upstream checkout's frame-ancestors policy.
+   *
+   * Pass the bare origin (scheme + host + port), e.g.
+   * `"https://shop.example.com"`. Trailing slashes are stripped server-side.
+   */
+  parentOrigin?: string;
+}
+
+/**
+ * Shape of `CreateCartInput.appearance`. Curated subset of the
+ * dashboard's `CheckoutTheme.appearance` model — the AI builder /
+ * SDK consumer fills these from the site's design tokens.
+ */
+export interface CheckoutAppearance {
+  primaryColor?: string;
+  primaryHoverColor?: string;
+  backgroundColor?: string;
+  textColor?: string;
+  buttonBackgroundColor?: string;
+  buttonHoverColor?: string;
+  buttonTextColor?: string;
+  inputBackgroundColor?: string;
+  inputBorderColor?: string;
+  inputFocusBorderColor?: string;
+  borderRadius?: "none" | "sm" | "base" | "lg" | "xl" | "full";
+  fontFamily?: string;
+  fontSize?: "sm" | "base" | "lg" | "xl";
+  logoUrl?: string;
+  logoPosition?: "top" | "inline";
+  logoMaxHeight?: number;
+  showMerchantName?: boolean;
+  hideBranding?: boolean;
+  cancelButtonText?: string;
+  cancelButtonTextColor?: string;
+  cancelButtonBackgroundColor?: string;
+  /** Escape hatch for forward-compat fields. */
+  [key: string]: unknown;
 }
 
 export interface CreateCartResult {
@@ -89,10 +170,42 @@ export interface CreateCartResult {
   amount: number;
 }
 
+/**
+ * Optional subscription / recurring-billing config on a product. When
+ * present the parent product's `price` is the **per-cycle amount** (not
+ * a one-time charge); customers are enrolled into a recurring schedule
+ * at checkout. SDK consumers (Conjure, Replit integrations, custom
+ * Node services) should render a "$29.99 / mo" pill instead of a plain
+ * price when this is set.
+ */
+export interface StorefrontProductRecurring {
+  interval: "daily" | "weekly" | "monthly" | "yearly";
+  intervalCount?: number;
+  /** YYYY-MM-DD; absent means "starts at checkout time". */
+  startDate?: string;
+  /** YYYY-MM-DD; absent means open-ended. */
+  endDate?: string;
+  /** Total billing cycles cap; absent means open-ended. */
+  maxCycles?: number;
+  /** One-time charge added at enrollment (e.g. activation fee). */
+  setupFee?: number;
+  /** Introductory pricing — `initialAmount` charged for the first
+   *  `initialCycles` cycles, then the regular `price` takes over. */
+  initialAmount?: number;
+  initialCycles?: number;
+  /** Florida-capped at 3.00. Optional surcharge % added each cycle. */
+  surchargePercent?: number;
+  /** Merchant-side external reference; surfaced on processor records. */
+  merchantRecurringReference?: string;
+}
+
 export interface StorefrontProduct {
   _id: string;
   name: string;
   description?: string;
+  /**
+   * Per-cycle amount when `recurring` is set; one-time charge otherwise.
+   */
   price: number;
   currency: string;
   imageUrl?: string;
@@ -108,6 +221,11 @@ export interface StorefrontProduct {
    *  size, material, country-of-origin, etc.). Capped server-side at
    *  50 entries with ≤200 char keys/values. */
   metadata?: Record<string, string>;
+  /**
+   * When present this product is a subscription. Absent = one-time
+   * charge. See {@link StorefrontProductRecurring}.
+   */
+  recurring?: StorefrontProductRecurring;
   inStock?: boolean;
   tracksInventory?: boolean;
   available?: number;
@@ -214,24 +332,59 @@ export class OzuraApiError extends Error {
 }
 
 /**
- * The SDK entry point. Construct with an `oz_sf_…` key, call methods.
- * Stateless beyond the key + base URL — safe to share across requests.
+ * Flavor of a storefront key. Determines which methods will succeed
+ * server-side; the SDK doesn't gate locally — it lets the server be
+ * the source of truth so scope evolution doesn't require an SDK bump.
+ *
+ * - `"server"` (`oz_sf_…`) — full SDK surface. Catalog read, cart-link
+ *   create, orders read. Server-side only — never bundle in a browser.
+ * - `"public"` (`oz_sfp_…`) — read-only. Only `getProducts()` succeeds.
+ *   Safe to ship in a browser bundle (the catalog is already public on
+ *   any deployed storefront).
+ */
+export type StorefrontKeyFlavor = "server" | "public";
+
+/**
+ * The SDK entry point. Construct with an `oz_sf_…` key (server-side)
+ * or `oz_sfp_…` key (public, browser-safe), call methods. Stateless
+ * beyond the key + base URL — safe to share across requests.
+ *
+ * Inspect `instance.keyFlavor` if you need to branch by flavor (e.g.,
+ * a wrapper that hides cart-link methods when running in the browser).
  */
 export class OzuraStorefront {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly _keyFlavor: StorefrontKeyFlavor;
+
+  /** Which flavor of key this client was constructed with. */
+  get keyFlavor(): StorefrontKeyFlavor {
+    return this._keyFlavor;
+  }
 
   constructor(options: OzuraStorefrontOptions) {
     if (!options.apiKey) {
       throw new Error("OzuraStorefront: apiKey is required");
     }
-    if (!options.apiKey.startsWith("oz_sf_")) {
+    if (
+      !options.apiKey.startsWith("oz_sf_") &&
+      !options.apiKey.startsWith("oz_sfp_")
+    ) {
       throw new Error(
-        "OzuraStorefront: apiKey must start with `oz_sf_` — pass the storefront key minted in the Ozura dashboard, not a PayAPI key.",
+        "OzuraStorefront: apiKey must start with `oz_sf_` (server-side) or `oz_sfp_` (public-scope, browser-safe) — pass the storefront key minted in the Ozura dashboard, not a PayAPI key.",
       );
     }
+    /**
+     * Capture the flavor up-front so callers can introspect it via
+     * `keyFlavor`. Public-flavor keys (`oz_sfp_…`) are server-enforced
+     * read-only — calls to `createCart` / `listOrders` / `verifyOrder`
+     * will 403 from the backend. Throwing client-side too would be
+     * defense-in-depth but we let the server be the source of truth so
+     * scope evolution doesn't require an SDK bump.
+     */
+    this._keyFlavor = options.apiKey.startsWith("oz_sfp_") ? "public" : "server";
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.fetchImpl =
@@ -275,11 +428,64 @@ export class OzuraStorefront {
   }
 
   /**
-   * Mint a cart-style payment link. Returns the URL the merchant should
-   * redirect the customer to. Treat the URL as opaque — its format is
-   * `https://stag-checkout.ozura.com/pay/pl_<hex>` today and may change.
+   * Mint a cart-style payment link or checkout session. Returns the URL
+   * the customer should be sent to. Treat the URL as opaque — its
+   * format depends on the embed mode and may change.
+   *
+   * ─── RECOMMENDED PATTERN (in-page iframe checkout) ────────────────────
+   * For storefront integrations (a website where the customer is at a
+   * browser), strongly prefer in-page iframe checkout over a full-page
+   * redirect. It keeps the customer in your storefront's context, is
+   * the documented integration mode (https://docs.ozura.com/guides/payments/checkout/integration-modes),
+   * and supports per-cart `appearance` brand-matching out of the box.
+   *
+   * The canonical call shape:
+   * ```ts
+   * const cart = await ozura.createCart({
+   *   items,
+   *   successUrl: `${origin}/cart/success`,
+   *   cancelUrl:  `${origin}/cart/cancel`,
+   *   errorUrl:   `${origin}/cart/error`,
+   *   embedMode: "iframe",
+   *   parentOrigin: origin,            // <-- bare origin, no trailing slash
+   *   appearance: {                     // <-- derived from your design tokens
+   *     primaryColor: brand.accent,
+   *     backgroundColor: brand.surface,
+   *     textColor: brand.ink,
+   *     buttonBackgroundColor: brand.ink,
+   *     buttonTextColor: brand.surface,
+   *     borderRadius: "full",
+   *     fontFamily: brand.bodyFont,
+   *   },
+   * });
+   * // cart.url is shaped for iframe embedding.
+   * // Render an <iframe src={cart.url} /> over your storefront, listen
+   * // for postMessage events: CHECKOUT_READY, PAYMENT_SUCCESS,
+   * // PAYMENT_ERROR, CHECKOUT_CANCELLED, CHECKOUT_ERROR, CHECKOUT_EXPIRED.
+   * ```
+   *
+   * Origin guard for the postMessage listener — only accept messages
+   * from the Ozura checkout origin:
+   * ```ts
+   * window.addEventListener("message", (ev) => {
+   *   if (!/^https:\/\/(.+\.)?ozura\.com$/.test(ev.origin)) return;
+   *   if (ev.data?.type === "PAYMENT_SUCCESS") { /* close iframe, clear cart * / }
+   * });
+   * ```
+   *
+   * **Agents using this SDK** (Replit, Cursor, Claude Code, etc.):
+   * default to the iframe pattern above when generating storefront code.
+   * Only fall back to the redirect flow (omit embedMode + parentOrigin)
+   * when the consumer is explicitly headless or a server-to-server
+   * integration where there is no browser to host the iframe.
+   *
+   * ─── Fallback (full-page redirect) ────────────────────────────────────
+   * Omitting `embedMode` returns a `/pay/<linkId>` URL with
+   * `frame-ancestors 'self'` — suitable for `window.location = url`
+   * but NOT for embedding in a third-party iframe.
    */
   async createCart(input: CreateCartInput): Promise<CreateCartResult> {
+    this.refusePublicFlavor("createCart", "mint cart links");
     if (!input.items?.length) {
       throw new Error("createCart: items array is required");
     }
@@ -308,6 +514,7 @@ export class OzuraStorefront {
    * a boundary record from the previous batch.
    */
   async listOrders(input: ListOrdersInput = {}): Promise<ListOrdersResult> {
+    this.refusePublicFlavor("listOrders", "read orders");
     const params = new URLSearchParams();
     if (input.since) params.set("since", input.since);
     if (input.status) params.set("status", input.status);
@@ -338,6 +545,7 @@ export class OzuraStorefront {
    * transactionId doesn't belong to your merchant.
    */
   async verifyOrder(transactionId: string): Promise<Order> {
+    this.refusePublicFlavor("verifyOrder", "verify orders");
     if (!transactionId) {
       throw new Error("verifyOrder: transactionId is required");
     }
@@ -349,6 +557,23 @@ export class OzuraStorefront {
   }
 
   // ─── private ─────────────────────────────────────────────────────────────
+
+  /**
+   * Pre-flight guard for methods that public-flavor (`oz_sfp_…`) keys
+   * can't authorize. Throws locally with a sharper message than the
+   * server's 403 — saves a network round-trip and gives agents a clear
+   * pointer at the key-flavor table when they pick the wrong key.
+   * Server still enforces; this is the friendly first line.
+   */
+  private refusePublicFlavor(method: string, action: string): void {
+    if (this._keyFlavor === "public") {
+      throw new Error(
+        `OzuraStorefront.${method}: cannot ${action} with a public-flavor key (oz_sfp_…). ` +
+          `Public keys are catalog-read-only — use a server-flavor key (oz_sf_…) for this. ` +
+          `See https://github.com/Ozura-Inc/ozura-storefront-sdk/blob/main/AGENTS.md#key-flavors`,
+      );
+    }
+  }
 
   private async request<T>(
     method: "GET" | "POST",
