@@ -15,7 +15,14 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.3.5";
+export const SDK_VERSION = "0.3.6";
+
+/** Canonical SDK guidance for AI agents — generated from AGENTS.md.
+ *  Re-exported here so dashboard prompts and Conjure's codegen system
+ *  prompt can `import { AGENT_GUIDANCE_SDK } from "@ozura/storefront-sdk"`
+ *  instead of duplicating the rules. Update AGENTS.md and run
+ *  `npm run sync:agents` to regenerate. */
+export { AGENT_GUIDANCE_SDK } from "./agent-guidance.js";
 
 /**
  * Default Ozura storefront API base. Currently points at the development
