@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.3.6";
+export const SDK_VERSION = "0.3.7";
 
 /** Canonical SDK guidance for AI agents — generated from AGENTS.md.
  *  Re-exported here so dashboard prompts and Conjure's codegen system

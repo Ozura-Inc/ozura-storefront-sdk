@@ -156,6 +156,48 @@ items: [{
 
 Mixing recurring + one-off items in a single cart is not supported in v1. Split into separate \`createCart\` calls.
 
+## Shipping (physical goods)
+
+Pass \`collectShippingAddress: true\` on \`createCart\` whenever any item in the cart is physical. The Ozura product model has a \`requiresShipping\` boolean per item; the right pattern is \`products.some(p => p.requiresShipping)\`:
+
+\`\`\`ts
+const cart = await ozura.createCart({
+  items,
+  collectShippingAddress: items.some((i) => i.requiresShipping === true),
+  embedMode: "iframe",
+  parentOrigin: origin,
+  // …
+});
+\`\`\`
+
+Forgetting this is the most common quiet bug — a customer buys two t-shirts and the order lands with no address. The checkout iframe will skip the address step entirely if \`collectShippingAddress\` isn't set, and **there's no later prompt for it**.
+
+For carts that mix physical + digital, set the flag if *any* item needs shipping. Backends that store per-line shipping requirements can refine this later, but the cart-level boolean is what the iframe reads.
+
+## Confirmation pages — \`/cart/success\`, \`/cart/cancel\`, \`/cart/error\`
+
+\`createCart\` requires you to provide \`successUrl\` / \`cancelUrl\` / \`errorUrl\`. The iframe redirects the customer to one of these after checkout. Each page should:
+
+1. **postMessage the documented event up to \`window.parent\`** so any iframe overlay listening for it closes and updates state — \`PAYMENT_SUCCESS\`, \`CHECKOUT_CANCELLED\`, \`CHECKOUT_ERROR\` respectively.
+2. **Render a real confirmation message** as a fallback for cases where the iframe ends up rendered standalone (mis-config, deep link). At minimum: a thank-you message on success ("A copy of the receipt is on its way to your inbox"), neutral copy on cancel, and an error explanation on error. Never leave the iframe rendering a blank page or your homepage — customers won't know if their card was charged.
+
+Minimal success page:
+
+\`\`\`html
+<!doctype html>
+<title>Thank you</title>
+<h1>Order received.</h1>
+<p>A copy of the receipt is on its way to your inbox.</p>
+<a href="/">Back to the shop</a>
+<script>
+  if (window.parent && window.parent !== window) {
+    window.parent.postMessage({ type: "PAYMENT_SUCCESS" }, "*");
+  }
+</script>
+\`\`\`
+
+If you skip these pages, the iframe redirect lands on a 404 or the homepage and the overlay never closes — users think payment failed even when it succeeded.
+
 ## Order verification (after PAYMENT_SUCCESS)
 
 The iframe's \`PAYMENT_SUCCESS\` payload includes a \`paymentData.transactionId\`. **Always verify it server-side** before fulfilling — the postMessage is from a browser, never trust it directly:
@@ -175,6 +217,8 @@ if (order.status === "paid") {
 - ❌ Don't make up postMessage event names (\`ozura:checkout:success\`, \`payment.complete\`, etc.); only the documented \`CHECKOUT_READY\` / \`PAYMENT_SUCCESS\` / \`PAYMENT_ERROR\` / \`CHECKOUT_CANCELLED\` / \`CHECKOUT_ERROR\` / \`CHECKOUT_EXPIRED\` events fire.
 - ❌ Don't bake products into HTML at build time and skip runtime fetches — merchants edit catalogs in the dashboard and expect the storefront to reflect that without redeploy.
 - ❌ Don't trust \`transactionId\` from the postMessage to fulfill — verify via \`verifyOrder()\` first.
+- ❌ Don't omit \`collectShippingAddress\` when the cart contains physical items — the iframe skips the address step and the order lands with no shipping data.
+- ❌ Don't leave \`/cart/success\` / \`/cart/cancel\` / \`/cart/error\` as 404s or homepage redirects — customers can't tell if payment went through and the overlay never closes.
 
 ## Where to look
 
