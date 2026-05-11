@@ -119,6 +119,65 @@ window.addEventListener("message", (ev) => {
 
 The full event catalog and payload shapes are at https://docs.ozura.com/guides/payments/checkout/integration-modes.
 
+## Rendering catalog listings on the page
+
+**Don't loop over a static products array at build time.** Cards baked into HTML can't reflect a merchant's curation changes (or an integrator's preview override) without a redeploy. Instead, emit an empty grid shell + an in-page `<template>` for one card; the deployed site's runtime (`/ozura-storefront.js`, auto-injected) clones the template once per product fetched at page load.
+
+```html
+<section data-oz-product-grid>
+  <template data-oz-product-card>
+    <article class="product-card">
+      <img data-oz-bind="imageUrl" alt="">
+      <h3 data-oz-bind="name"></h3>
+      <p data-oz-bind="price" data-oz-format="currency"></p>
+      <a data-oz-bind-href="/products/${slug}">View details</a>
+      <button data-add-to-cart
+              data-oz-bind-attr="product-id:_id,product-name:name,product-price:price,product-image:imageUrl,product-currency:currency,product-requires-shipping:requiresShipping">
+        Add to cart
+      </button>
+    </article>
+  </template>
+  <div data-oz-grid-empty>No products yet.</div>
+</section>
+```
+
+**Grid filter mini-syntax** in the `data-oz-product-grid` value:
+
+| Value | Renders |
+|---|---|
+| `""` or `"all"` | every curated product |
+| `"tag:featured"` | products carrying the `featured` tag |
+| `"tags:a,b,c"` | products carrying ANY of these tags |
+| `"group:hats"` | products in the `hats` group |
+| `"groups:a,b"` | products in ANY of these groups |
+
+Multiple grids per page are fine — homepage featured strip + a `/shop` page with the full catalog use the same primitive with different filters.
+
+**Bind attribute reference** (used on elements inside `<template data-oz-product-card>`):
+
+- `data-oz-bind="fieldName"` — sets the element's `textContent`, or its `src` if it's `<img>`. Field names come from the catalog: `_id`, `name`, `description`, `price`, `currency`, `imageUrl`, `tags`, `group`, `sku`, `brand`, `productType`, `slug`, `requiresShipping`, etc.
+- `data-oz-bind-attr="attrName:fieldName,attrName:fieldName,..."` — multi-attribute binding. Each attribute gets prefixed with `data-` (so `product-id:_id` writes `data-product-id="<the id>"`).
+- `data-oz-bind-href="/path/with/${slug}"` — templated href. Tokens are `${fieldName}` substituted from the product.
+- `data-oz-format="currency"` — optional. Renders the bound value as `<CURRENCY> 0.00`.
+
+**Cart wiring is unchanged.** Keep using `data-add-to-cart` on the button. The bind attrs above stamp the `data-product-*` fields the existing cart drawer reads; no changes to the cart code path.
+
+### Override channels (for previews)
+
+When you (the agent) want to show a *draft* selection without saving to the backend — e.g. "show me what this site would look like if I picked these 3 products" — drive the same grid with an override:
+
+1. `window.__OZURA_PRODUCT_OVERRIDE = ["id1", "id2", ...]` (or full product objects) — set *before* `/ozura-storefront.js` initializes. Useful when you control the parent frame.
+2. `window.postMessage({ type: "ozura:catalog-preview", productIds: [...] }, "*")` — for cross-origin parents. The runtime is origin-gated to `dashboard.ozura.com`, dev variants, Vercel preview deployments, and localhost.
+3. `?ozPreviewProducts=id1,id2,id3` URL param on the page itself — stateless shareable preview links.
+
+The runtime hydrates id-only arrays via a single `/api/products?ids=` call, so you can pass IDs without fleshing them out yourself.
+
+This is the contract Replit (and any other agentic playground) uses to "preview before commit": the SDK pushes a productIds array to the rendered page; the merchant approves; the integration code then calls the backend's catalog-curation endpoint to persist.
+
+### PDPs (product detail pages)
+
+PDPs at `/products/<slug>` stay server-rendered via Astro's `getStaticPaths` — they're useful for SEO and direct linking. The deploy pipeline writes a `src/data/products.ts` containing the curated catalog; reference it from `getStaticPaths` to enumerate which PDPs to build. **Don't** loop over `products.ts` for listings on the homepage etc. — those go through `data-oz-product-grid`. The static `products.ts` is for the build-time route enumeration only.
+
 ## Server-side only — do NOT bundle this SDK into the browser
 
 The constructor takes an `oz_sf_…` storefront key. That key carries scopes including `cart-link:create` and (potentially) `orders:read` — you cannot safely expose it to a browser. The SDK warns on misuse but the only correct pattern is:
