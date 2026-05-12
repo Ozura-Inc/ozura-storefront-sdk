@@ -151,15 +151,47 @@ The full event catalog and payload shapes are at https://docs.ozura.com/guides/p
 
 **Grid filter mini-syntax** in the \`data-oz-product-grid\` value:
 
-| Value | Renders |
-|---|---|
-| \`""\` or \`"all"\` | every curated product |
-| \`"tag:featured"\` | products carrying the \`featured\` tag |
-| \`"tags:a,b,c"\` | products carrying ANY of these tags |
-| \`"group:hats"\` | products in the \`hats\` group |
-| \`"groups:a,b"\` | products in ANY of these groups |
+| Value | Renders | Endpoint |
+|---|---|---|
+| \`""\` or \`"all"\` | every curated product | \`GET /api/products\` |
+| \`"tag:oz-grid-<slug>"\` | the merchant's named grid \`<slug>\`, in their drag-ordered sequence | \`GET /api/grids/<slug>\` |
+| \`"tag:featured"\` | products carrying the \`featured\` tag (free-form, no ordering) | \`GET /api/products?tags=featured\` |
+| \`"tags:a,b,c"\` | products carrying ANY of these tags | \`GET /api/products?tags=a,b,c\` |
+| \`"group:hats"\` | products in the \`hats\` group | \`GET /api/products?groups=hats\` |
+| \`"groups:a,b"\` | products in ANY of these groups | \`GET /api/products?groups=a,b\` |
 
-Multiple grids per page are fine — homepage featured strip + a \`/shop\` page with the full catalog use the same primitive with different filters.
+The runtime issues **one fetch per \`data-oz-product-grid\` container** (each grid is independent). You can put multiple grids on a page — a homepage featured strip emitting \`tag:oz-grid-featured\` AND a \`/shop\` page emitting a default \`data-oz-product-grid\` are both first-class.
+
+### Named grids — the \`oz-grid-\` prefix
+
+Merchants manage "named grids" in the dashboard (Featured, Bestsellers, Holiday Sale, etc.). Each grid has a stable \`slug\` and surfaces as the tag \`oz-grid-<slug>\` on products. When your template emits \`data-oz-product-grid="tag:oz-grid-featured"\`, the runtime hits \`GET /api/grids/featured\`, which returns the merchant's chosen products **in their chosen order**. Free-form tags (\`tag:summer-2026\`) skip the Grid metadata path and just filter the catalog — useful for ad-hoc collections but no drag-to-order.
+
+When a storefront has multiple product-listing surfaces (homepage strip + \`/shop\` + \`/sale\` etc.), emit a **distinct grid filter per surface**. Don't reuse the same tag for "all". The merchant-facing rename happens on the Grid's display name; templates reference the slug, which never changes, so renames don't break your markup.
+
+### Pagination (large catalogs)
+
+The catalog endpoint caps responses at **100 products per request** (default 50). The grid endpoint follows the same cap. You pick how listings handle catalogs that exceed the cap:
+
+| Strategy | Where it lives | When to use |
+|---|---|---|
+| **Single-page, no pagination** | Default. Just emit one grid. | < 50 products; one-glance browsing. |
+| **Paginated grid (\`?page=\`)** | Use \`data-oz-page-size="N"\` + \`<button data-oz-load-more>\`. Runtime appends pages on click. | 50–500 products; "Load more" UX. |
+| **Multiple themed sections** | Multiple grids on one page (\`tag:oz-grid-bestsellers\`, \`tag:oz-grid-new\`, etc.). | Editorial homepage; lets the merchant curate strips of <50 each. |
+| **Server-side pagination via routes** | Emit \`/shop\`, \`/shop/page/2\`, etc. via Astro \`getStaticPaths\` driven by \`src/data/products.ts\`. | SEO-critical pagination; full SSR control. |
+
+For "Load more" mode, the runtime handles the request:
+
+\`\`\`html
+<section data-oz-product-grid data-oz-page-size="20">
+  <template data-oz-product-card>…</template>
+  <button data-oz-load-more>Load more</button>
+  <div data-oz-grid-empty>No products yet.</div>
+</section>
+\`\`\`
+
+The runtime fetches the first 20, hides \`[data-oz-load-more]\` when fewer than 20 came back or the next page is empty, and appends cards on each click. Page-size caps at 100; the server-side enforced limit always wins.
+
+For very large catalogs (500+), prefer **multiple themed grids** over one giant paginated list — it's better UX for the customer and gives the merchant a curation tool that actually scales. The agent should propose this in onboarding rather than emitting one massive \`<section data-oz-product-grid>\`.
 
 **Bind attribute reference** (used on elements inside \`<template data-oz-product-card>\`):
 
