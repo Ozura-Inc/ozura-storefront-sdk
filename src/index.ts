@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.3.7";
+export const SDK_VERSION = "0.4.0-alpha.1";
 
 /** Canonical SDK guidance for AI agents — generated from AGENTS.md.
  *  Re-exported here so dashboard prompts and Conjure's codegen system
@@ -344,6 +344,94 @@ export class OzuraApiError extends Error {
  */
 export type StorefrontKeyFlavor = "server" | "public";
 
+// ─── SDK 0.4: agent-handoff types ─────────────────────────────────────
+
+/**
+ * Chained-hint protocol shared by SDK 0.4's `bootstrap` + curation
+ * methods. The backend includes this whenever the request set the
+ * `X-Ozura-Agent-Guide: 1` header (the SDK sets it automatically on
+ * the methods that return one).
+ *
+ * Agent loop:
+ *   1. Read `nextStep` — the most useful action right now (usually a
+ *      question to ask the merchant or a method to call).
+ *   2. Resolve it. Call the suggested SDK method.
+ *   3. Read the new response's `agentGuide.nextStep`, repeat.
+ *   4. When `nextStep === null`, no more questions to ask — start
+ *      writing markup, deploy, then call `validate(siteUrl)`.
+ */
+export interface AgentGuide {
+  nextStep: string | null;
+  followUps?: string[];
+  /** Inline HTML / code snippet for the agent to use verbatim. */
+  snippet?: string;
+  /** Finite picks for the merchant when `nextStep` is a question. */
+  options?: AgentGuideOption[];
+}
+
+export interface AgentGuideOption {
+  id: string;
+  label: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface BootstrapResult {
+  storefront: {
+    name: string;
+    id: string;
+    liveUrl: string | null;
+    status:
+      | "draft"
+      | "preview"
+      | "live"
+      | "failed"
+      | "archived"
+      | "deploying";
+  };
+  catalog: {
+    total: number;
+    sample: Array<{
+      id: string;
+      slug: string;
+      name: string;
+      price: number;
+      currency: string;
+      imageUrl?: string;
+      group?: string;
+      brand?: string;
+    }>;
+    groups: string[];
+    brands: string[];
+  };
+  grids: Array<{
+    slug: string;
+    displayName: string;
+    productCount: number;
+    sampleNames: string[];
+    pageSize: number | null;
+  }>;
+  runtime: {
+    /** CDN URL for the storefront runtime script (jsDelivr-hosted). */
+    scriptUrl: string;
+    /** Ready-to-paste `<script src="…" defer></script>` tag. */
+    scriptTag: string;
+    /** Example `<section data-oz-product-grid="…">` markup the agent
+     *  can paste verbatim. */
+    gridMarkerExample: string;
+  };
+  agentGuide: AgentGuide;
+}
+
+export interface GridUpdateResult {
+  grid: {
+    slug: string;
+    displayName: string;
+    productOrder: string[];
+    pageSize: number | null;
+  };
+  agentGuide?: AgentGuide;
+}
+
 /**
  * The SDK entry point. Construct with an `oz_sf_…` key (server-side)
  * or `oz_sfp_…` key (public, browser-safe), call methods. Stateless
@@ -556,6 +644,82 @@ export class OzuraStorefront {
     return res.data;
   }
 
+  // ─── SDK 0.4: agent-handoff surface ──────────────────────────────────────
+
+  /**
+   * The SDK's "first call." Returns the merchant's storefront context
+   * (catalog summary + grid list + runtime info) so an agent can start
+   * a conversation with the merchant about what to build.
+   *
+   * The response always includes an `agentGuide` field with a
+   * `nextStep` telling the agent the most useful next action — usually
+   * a question to ask the merchant. Chain through the conversation by
+   * calling the suggested SDK method, then reading `agentGuide` on its
+   * response, etc. When `agentGuide.nextStep === null`, configuration
+   * is complete and the agent should start writing markup.
+   *
+   * Works with both `oz_sf_` and `oz_sfp_` key flavors (catalog read
+   * scope). The key MUST be bound to a specific website — bootstrap is
+   * meaningless without a target storefront. Merchant-wide keys 400.
+   */
+  async bootstrap(): Promise<BootstrapResult> {
+    return this.requestWithAgentGuide<BootstrapResult>(
+      "GET",
+      "/api/storefront/bootstrap",
+    );
+  }
+
+  /**
+   * Replace the "Featured" grid's productOrder. Use after the merchant
+   * picks which items to feature on the home page. Response includes
+   * an `agentGuide` chaining to the next conversational step.
+   */
+  async setFeatured(productIds: string[]): Promise<GridUpdateResult> {
+    this.refusePublicFlavor("setFeatured", "curate grids");
+    return this.setGrid("featured", productIds);
+  }
+
+  /**
+   * Replace the "Shop catalog" grid's productOrder. The Shop catalog is
+   * the canonical "everything available on this storefront" set —
+   * detaching a product here also dual-writes Product.websiteIds so
+   * the per-site catalog filter stays in sync.
+   */
+  async setShopCatalog(productIds: string[]): Promise<GridUpdateResult> {
+    this.refusePublicFlavor("setShopCatalog", "curate grids");
+    return this.setGrid("shop-catalog", productIds);
+  }
+
+  /**
+   * Replace any grid's productOrder by slug. Used by `setFeatured` and
+   * `setShopCatalog` under the hood; call directly for custom grids
+   * (category strips, sale pages, etc.).
+   */
+  async setGrid(
+    slug: string,
+    productIds: string[],
+  ): Promise<GridUpdateResult> {
+    this.refusePublicFlavor("setGrid", "curate grids");
+    if (!slug.trim()) {
+      throw new Error("setGrid: slug is required");
+    }
+    if (!Array.isArray(productIds)) {
+      throw new Error("setGrid: productIds must be an array of strings");
+    }
+    const res = await this.requestWithAgentGuide<{
+      grid: {
+        slug: string;
+        displayName: string;
+        productOrder: string[];
+        pageSize: number | null;
+      };
+      agentGuide?: AgentGuide;
+    }>("PATCH", `/api/grids/${encodeURIComponent(slug)}`, {
+      body: { productOrder: productIds },
+    });
+    return res;
+  }
+
   // ─── private ─────────────────────────────────────────────────────────────
 
   /**
@@ -575,10 +739,31 @@ export class OzuraStorefront {
     }
   }
 
-  private async request<T>(
-    method: "GET" | "POST",
+  /**
+   * Same as `request` but sets the `X-Ozura-Agent-Guide: 1` header so
+   * the backend includes an `agentGuide` field in the response. Used
+   * by bootstrap() + the curation methods that chain the
+   * conversational hints through to the agent.
+   */
+  private async requestWithAgentGuide<T>(
+    method: "GET" | "POST" | "PATCH",
     path: string,
-    opts: { body?: unknown; includeAuth?: boolean } = {},
+    opts: { body?: unknown } = {},
+  ): Promise<T> {
+    return this.request<T>(method, path, {
+      ...opts,
+      extraHeaders: { "x-ozura-agent-guide": "1" },
+    });
+  }
+
+  private async request<T>(
+    method: "GET" | "POST" | "PATCH",
+    path: string,
+    opts: {
+      body?: unknown;
+      includeAuth?: boolean;
+      extraHeaders?: Record<string, string>;
+    } = {},
   ): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -591,6 +776,11 @@ export class OzuraStorefront {
       }
       if (opts.body !== undefined) {
         headers["content-type"] = "application/json";
+      }
+      if (opts.extraHeaders) {
+        for (const [k, v] of Object.entries(opts.extraHeaders)) {
+          headers[k.toLowerCase()] = v;
+        }
       }
 
       const res = await this.fetchImpl(`${this.baseUrl}${path}`, {
