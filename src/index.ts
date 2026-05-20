@@ -15,7 +15,7 @@
  * intentionally has no browser build.
  */
 
-export const SDK_VERSION = "0.4.0-alpha.1";
+export const SDK_VERSION = "0.4.0-alpha.2";
 
 /** Canonical SDK guidance for AI agents — generated from AGENTS.md.
  *  Re-exported here so dashboard prompts and Conjure's codegen system
@@ -433,6 +433,41 @@ export interface GridUpdateResult {
 }
 
 /**
+ * A single structural check run by `validate(siteUrl)`.
+ *
+ * Each check has a stable `id` an agent can branch on, a `label`
+ * suitable for showing the merchant, and a `status`. When `status` is
+ * `"fail"` or `"warn"` the `remedy` field gives the agent a one-line
+ * instruction it can act on (typically: add this markup, or link this
+ * script).
+ */
+export interface ValidateCheck {
+  id: string;
+  label: string;
+  status: "pass" | "fail" | "warn";
+  detail?: string;
+  remedy?: string;
+}
+
+/**
+ * Result of `validate(siteUrl)` — a structural-correctness audit of a
+ * deployed storefront URL. The SDK fetches the page, scans the HTML
+ * for the runtime-contract markers (script tags, grid containers,
+ * card templates, add-to-cart triggers) and rolls the per-check
+ * results up into `overallStatus`.
+ *
+ * Treat `agentGuide.nextStep === null` as "all good, no action."
+ * Otherwise the `nextStep` string captures the first actionable
+ * remedy (label + detail + remedy) for the agent to surface.
+ */
+export interface ValidateResult {
+  siteUrl: string;
+  overallStatus: "pass" | "fail" | "warn";
+  checks: ValidateCheck[];
+  agentGuide?: AgentGuide;
+}
+
+/**
  * The SDK entry point. Construct with an `oz_sf_…` key (server-side)
  * or `oz_sfp_…` key (public, browser-safe), call methods. Stateless
  * beyond the key + base URL — safe to share across requests.
@@ -718,6 +753,234 @@ export class OzuraStorefront {
       body: { productOrder: productIds },
     });
     return res;
+  }
+
+  /**
+   * Preflight check that a deployed storefront page is wired up
+   * correctly. The agent calls this after the merchant publishes
+   * markup that's supposed to render Ozura products — `validate` GETs
+   * the page and scans the HTML for the runtime-contract markers:
+   *
+   *   • the storefront runtime <script src> (jsDelivr or self-hosted)
+   *   • the cart runtime <script src> (conjure-pipeline-injected)
+   *   • at least one `[data-oz-product-grid]` container
+   *   • a `<template data-oz-product-card>` inside (or `[data-add-to-cart]`
+   *     as the soft-fallback contract — warn-level)
+   *   • at least one `[data-add-to-cart]` trigger
+   *
+   * Returns a checks matrix the agent can surface to the merchant
+   * verbatim, plus an `agentGuide.nextStep` pointing at the first
+   * actionable fix. When everything passes, `agentGuide.nextStep` is
+   * `null` and the integration is verified.
+   *
+   * The fetch is unauthenticated — the SDK never sends the merchant's
+   * API key to the merchant's own deployed origin. Works with either
+   * key flavor.
+   */
+  async validate(siteUrl: string): Promise<ValidateResult> {
+    if (!siteUrl || typeof siteUrl !== "string") {
+      throw new Error("validate: siteUrl is required");
+    }
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(siteUrl);
+    } catch {
+      throw new Error(`validate: ${siteUrl} is not a valid URL`);
+    }
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      throw new Error("validate: siteUrl must use http(s)");
+    }
+
+    const checks: ValidateCheck[] = [];
+    let html: string | null = null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await this.fetchImpl(siteUrl, {
+        method: "GET",
+        headers: { accept: "text/html,*/*" },
+        redirect: "follow",
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        checks.push({
+          id: "page-reachable",
+          label: "Storefront page reachable",
+          status: "fail",
+          detail: `HTTP ${res.status}`,
+          remedy:
+            "Confirm the URL is correct and the site has finished deploying.",
+        });
+      } else {
+        const ct = (res.headers.get("content-type") ?? "").toLowerCase();
+        if (!ct.includes("html")) {
+          checks.push({
+            id: "page-reachable",
+            label: "Storefront page reachable",
+            status: "fail",
+            detail: `Got ${ct || "no content-type"} (expected text/html)`,
+            remedy:
+              "Point at the storefront home page, not an API or asset URL.",
+          });
+        } else {
+          html = await res.text();
+          checks.push({
+            id: "page-reachable",
+            label: "Storefront page reachable",
+            status: "pass",
+          });
+        }
+      }
+    } catch (err) {
+      checks.push({
+        id: "page-reachable",
+        label: "Storefront page reachable",
+        status: "fail",
+        detail: err instanceof Error ? err.message : String(err),
+        remedy: "Check the URL and that the site is live.",
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (html !== null) {
+      const hasRuntimeScript =
+        /<script[^>]+src=["'][^"']*ozura-storefront\.js[^"']*["']/i.test(
+          html,
+        ) ||
+        /<script[^>]+src=["'][^"']*@ozura\/storefront-sdk[^"']*runtime[^"']*["']/i.test(
+          html,
+        );
+      checks.push(
+        hasRuntimeScript
+          ? {
+              id: "runtime-script",
+              label: "Storefront runtime script linked",
+              status: "pass",
+            }
+          : {
+              id: "runtime-script",
+              label: "Storefront runtime script linked",
+              status: "fail",
+              detail:
+                "No <script src> matching ozura-storefront.js or the @ozura/storefront-sdk runtime asset.",
+              remedy: `Add <script src="https://cdn.jsdelivr.net/npm/@ozura/storefront-sdk@${SDK_VERSION}/dist/runtime/storefront.js" defer></script> to <head>.`,
+            },
+      );
+
+      const hasGrid = /data-oz-product-grid\b/i.test(html);
+      checks.push(
+        hasGrid
+          ? {
+              id: "product-grid",
+              label: "Product grid container present",
+              status: "pass",
+            }
+          : {
+              id: "product-grid",
+              label: "Product grid container present",
+              status: "fail",
+              detail:
+                "No element carries the data-oz-product-grid attribute.",
+              remedy:
+                'Add a container like <section data-oz-product-grid="tag:oz-grid-featured">…</section> on the page.',
+            },
+      );
+
+      const hasCardTemplate =
+        /<template[^>]+data-oz-product-card\b/i.test(html);
+      const hasAddToCart = /\bdata-add-to-cart\b/i.test(html);
+      if (hasCardTemplate) {
+        checks.push({
+          id: "product-card-template",
+          label: "Product card template defined",
+          status: "pass",
+        });
+      } else if (hasAddToCart && hasGrid) {
+        checks.push({
+          id: "product-card-template",
+          label: "Product card template defined",
+          status: "warn",
+          detail:
+            "No <template data-oz-product-card> found; runtime will fall back to cloning the first [data-add-to-cart] card. Works but is less explicit.",
+          remedy:
+            "Wrap the example card markup in <template data-oz-product-card>…</template> inside each grid container.",
+        });
+      } else {
+        checks.push({
+          id: "product-card-template",
+          label: "Product card template defined",
+          status: "fail",
+          detail:
+            "Neither <template data-oz-product-card> nor any [data-add-to-cart] element found inside a grid.",
+          remedy:
+            "Add a <template data-oz-product-card> inside the grid with the card markup the runtime should clone (image, title, price, add-to-cart button).",
+        });
+      }
+
+      const hasCartScript =
+        /<script[^>]+src=["'][^"']*ozura-cart\.js[^"']*["']/i.test(html);
+      checks.push(
+        hasCartScript
+          ? {
+              id: "cart-script",
+              label: "Cart runtime script linked",
+              status: "pass",
+            }
+          : {
+              id: "cart-script",
+              label: "Cart runtime script linked",
+              status: "warn",
+              detail:
+                "No <script src> matching /ozura-cart.js. Sites deployed through the Ozura conjure pipeline have this auto-injected.",
+              remedy:
+                "If the site wasn't deployed through Conjure, add the cart script tag manually — otherwise [data-add-to-cart] clicks won't open checkout.",
+            },
+      );
+
+      checks.push(
+        hasAddToCart
+          ? {
+              id: "add-to-cart-trigger",
+              label: "Add-to-cart trigger present",
+              status: "pass",
+            }
+          : {
+              id: "add-to-cart-trigger",
+              label: "Add-to-cart trigger present",
+              status: "fail",
+              detail: "No [data-add-to-cart] element on the page.",
+              remedy:
+                "Add a <button data-add-to-cart> inside each product card markup.",
+            },
+      );
+    }
+
+    const hasFail = checks.some((c) => c.status === "fail");
+    const hasWarn = checks.some((c) => c.status === "warn");
+    const overallStatus: "pass" | "fail" | "warn" = hasFail
+      ? "fail"
+      : hasWarn
+        ? "warn"
+        : "pass";
+
+    let agentGuide: AgentGuide;
+    if (overallStatus === "pass") {
+      agentGuide = { nextStep: null };
+    } else {
+      const firstActionable = checks.find(
+        (c) =>
+          (c.status === "fail" || c.status === "warn") && c.remedy !== undefined,
+      );
+      agentGuide = firstActionable
+        ? {
+            nextStep: `${firstActionable.label}: ${firstActionable.detail ?? "needs attention"} — ${firstActionable.remedy}`,
+          }
+        : { nextStep: "One or more checks failed. See `checks` for details." };
+    }
+
+    return { siteUrl, overallStatus, checks, agentGuide };
   }
 
   // ─── private ─────────────────────────────────────────────────────────────
